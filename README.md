@@ -18,6 +18,7 @@ An AI application that allows users to upload a PDF and ask questions about the 
 ## Installation
 
 git clone https://github.com/pradeeprathod1165/AI-Document-QA.git
+
 cd AI-Document-QA
 
 python3 -m venv venv
