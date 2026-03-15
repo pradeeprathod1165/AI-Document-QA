@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
@@ -6,60 +7,156 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 
-st.title("AI Document Question Answering")
+st.set_page_config(page_title="AI Document Chat", layout="wide")
 
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+st.title("📚 AI Document Chat")
 
-if uploaded_file:
+FAISS_PATH = "faiss_index"
 
-    with open("temp.pdf", "wb") as f:
-        f.write(uploaded_file.read())
+# -----------------------------
+# Load LLM once (faster + token limit)
+# -----------------------------
+if "llm" not in st.session_state:
+    st.session_state.llm = Ollama(
+        model="phi3:mini",
+        num_predict=120
+    )
 
-    with st.spinner("Processing document..."):
+# -----------------------------
+# Cache embeddings
+# -----------------------------
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-        loader = PyPDFLoader("temp.pdf")
-        documents = loader.load()
+embeddings = load_embeddings()
+
+# -----------------------------
+# Chat history
+# -----------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# -----------------------------
+# Sidebar
+# -----------------------------
+with st.sidebar:
+
+    st.header("Upload Documents")
+
+    uploaded_files = st.file_uploader(
+        "Upload PDFs",
+        type="pdf",
+        accept_multiple_files=True
+    )
+
+    process = st.button("Process Documents")
+
+    if process and uploaded_files:
+
+        all_documents = []
+
+        for uploaded_file in uploaded_files:
+
+            with open(uploaded_file.name, "wb") as f:
+                f.write(uploaded_file.read())
+
+            loader = PyPDFLoader(uploaded_file.name)
+            docs = loader.load()
+
+            all_documents.extend(docs)
+
+        st.write("✂️ Splitting documents...")
 
         splitter = CharacterTextSplitter(
-            chunk_size=800,
-            chunk_overlap=100
+            chunk_size=500,
+            chunk_overlap=50
         )
 
-        texts = splitter.split_documents(documents)
+        texts = splitter.split_documents(all_documents)
 
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        st.write("🧠 Creating embeddings...")
 
         db = FAISS.from_documents(texts, embeddings)
 
-    st.success("Document processed!")
+        db.save_local(FAISS_PATH)
 
-    query = st.text_input("Ask a question about the document")
+        st.session_state.db = db
 
-    if query:
+        st.success("✅ Documents processed and saved!")
 
-        with st.spinner("Thinking..."):
+    if st.button("Clear Chat"):
+        st.session_state.messages = []
 
-            docs = db.similarity_search(query, k=3)
+# -----------------------------
+# Load FAISS if exists
+# -----------------------------
+if "db" not in st.session_state:
 
-            context = "\n\n".join([doc.page_content for doc in docs])
+    if os.path.exists(FAISS_PATH):
 
-            llm = Ollama(model="phi3")
+        st.session_state.db = FAISS.load_local(
+            FAISS_PATH,
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
 
-            prompt = f"""
-You are an AI assistant that answers questions based on the given document.
+# -----------------------------
+# Chat Interface
+# -----------------------------
+for message in st.session_state.messages:
+
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+# -----------------------------
+# User Input
+# -----------------------------
+query = st.chat_input("Ask a question about your documents")
+
+if query and "db" in st.session_state:
+
+    st.session_state.messages.append({"role": "user", "content": query})
+
+    with st.chat_message("user"):
+        st.write(query)
+
+    with st.chat_message("assistant"):
+
+        thinking = st.status("🔎 Searching documents...", expanded=False)
+
+        docs = st.session_state.db.similarity_search(query, k=1)
+
+        thinking.update(label="🧠 Generating answer...", state="running")
+
+        # Limit context size (major speed improvement)
+        context = docs[0].page_content[:1000]
+
+        prompt = f"""
+Use the context to answer the question.
 
 Context:
 {context}
 
-Question:
-{query}
+Question: {query}
 
-Give a clear and helpful answer.
+Answer in 2-3 short sentences.
 """
 
-            answer = llm.invoke(prompt)
+        response = st.session_state.llm.stream(prompt)
 
-            st.write("### Answer")
-            st.write(answer)
+        message_placeholder = st.empty()
+
+        full_response = ""
+
+        for chunk in response:
+            full_response += chunk
+            message_placeholder.write(full_response)
+
+        thinking.update(label="✅ Done", state="complete")
+
+    st.session_state.messages.append(
+        {"role": "assistant", "content": full_response}
+    )
