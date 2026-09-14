@@ -1,5 +1,4 @@
 # AI Document QA
-
 An AI application that allows users to upload a PDF and ask questions about the document.
 
 ## Features
